@@ -1,0 +1,201 @@
+<# Multi-AZ + IIS Web Servers + ELB (Elastic Load Balancer) + Auto Scalling  #>
+<# PowerShell Conference Asia 2016 #>
+<# October 2016, Singapore #>
+<# Guillermo Musumeci @gmusumeci #>
+
+#Update the AWS Region
+Set-DefaultAWSRegion -Region ap-southeast-1
+
+#Create the VPC
+$VPCCIDR = '192.168.0.0/16'
+$VPC = New-EC2Vpc -CidrBlock $VPCCIDR
+New-EC2Tag -ResourceId $VPC.VpcId -Tag @{Key='Name';Value='PROD VPC'}
+
+#Get the availability zone
+$PROAvailabilityZone1 = Get-EC2AvailabilityZone | Select-Object -First 1 -ExpandProperty ZoneName
+$PROAvailabilityZone2 = Get-EC2AvailabilityZone | Select-Object -First 2 -Skip 1 -ExpandProperty ZoneName
+
+#Create the public subnet AZ1
+$PublicSubnetCIDRAZ1 = '192.168.1.0/24'
+$PublicSubnetAZ1 = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PublicSubnetCIDRAZ1 -AvailabilityZone $PROAvailabilityZone1
+New-EC2Tag -ResourceId $PublicSubnetAZ1.SubnetId -Tag @{Key='Name';Value='PRO AZ1 Public Subnet'}
+
+#Create the public subnet AZ2
+$PublicSubnetCIDRAZ2 = '192.168.2.0/24'
+$PublicSubnetAZ2 = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PublicSubnetCIDRAZ2 -AvailabilityZone $PROAvailabilityZone2
+New-EC2Tag -ResourceId $PublicSubnetAZ2.SubnetId -Tag @{Key='Name';Value='PRO AZ2 Public Subnet'}
+
+#Create the private subnet AZ1
+$PrivateSubnetCIDRAZ1 = '192.168.3.0/24'
+$PrivateSubnetAZ1 = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PrivateSubnetCIDRAZ1 -AvailabilityZone $PROAvailabilityZone1
+New-EC2Tag -ResourceId $PrivateSubnetAZ1.SubnetId -Tag @{Key='Name';Value='PROD AZ1 Private Subnet'}
+
+#Create the private subnet AZ2
+$PrivateSubnetCIDRAZ2 = '192.168.4.0/24'
+$PrivateSubnetAZ2 = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PrivateSubnetCIDRAZ2 -AvailabilityZone $PROAvailabilityZone2
+New-EC2Tag -ResourceId $PrivateSubnetAZ2.SubnetId -Tag @{Key='Name';Value='PROD AZ2 Private Subnet'}
+
+#Create and Attach Internet Gateway to the VPC
+$InternetGateway = New-EC2InternetGateway
+Add-EC2InternetGateway -InternetGatewayId $InternetGateway.InternetGatewayId -VpcId $VPC.VpcId
+New-EC2Tag -ResourceId $InternetGateway.InternetGatewayId  -Tag @{Key='Name';Value='PROD Internet Gateway'}
+
+#Allocate Elactic IP for NAT Geteway
+$newipAZ1 = New-EC2Address
+$newipAZ2 = New-EC2Address
+
+#Create a NAT Gateway AZ1
+$NatGatewayAZ1 = New-EC2NatGateway -AllocationId $newipAZ1.AllocationId -SubnetId $PublicSubnetAZ1.SubnetId
+
+#Create a NAT Gateway AZ2
+$NatGatewayAZ2 = New-EC2NatGateway -AllocationId $newipAZ2.AllocationId -SubnetId $PublicSubnetAZ2.SubnetId
+
+#Get NAT Gateway ID
+$NatGatewayIDAZ1 = Get-EC2NatGateway -filter @{name='subnet-id';values=$PublicSubnetAZ1.SubnetId}  | select -ExpandProperty NatGatewayId
+$NatGatewayIDAZ2 = Get-EC2NatGateway -filter @{name='subnet-id';values=$PublicSubnetAZ2.SubnetId}  | select -ExpandProperty NatGatewayId
+
+#Create Rules Security Groups for External and Internal Access
+$RDP = New-Object Amazon.EC2.Model.IpPermission
+$RDP.IpProtocol = 'tcp'
+$RDP.FromPort = '3389'
+$RDP.ToPort = '3389'
+$RDP.IpRange.add('0.0.0.0/0')
+
+$SSH = New-Object Amazon.EC2.Model.IpPermission
+$SSH.IpProtocol = 'tcp'
+$SSH.FromPort = '22'
+$SSH.ToPort = '22'
+$SSH.IpRange.add('0.0.0.0/0')
+
+$InternalAZ1 = New-Object Amazon.EC2.Model.IpPermission
+$InternalAZ1.IpProtocol = 'tcp'
+$InternalAZ1.FromPort = '1'
+$InternalAZ1.ToPort = '65535'
+$InternalAZ1.IpRange.add('192.168.3.0/24')
+
+$InternalAZ2 = New-Object Amazon.EC2.Model.IpPermission
+$InternalAZ2.IpProtocol = 'tcp'
+$InternalAZ2.FromPort = '1'
+$InternalAZ2.ToPort = '65535'
+$InternalAZ2.IpRange.add('192.168.4.0/24')
+
+$RDPintAZ1 = New-Object Amazon.EC2.Model.IpPermission
+$RDPintAZ1.IpProtocol = 'tcp'
+$RDPintAZ1.FromPort = '3389'
+$RDPintAZ1.ToPort = '3389'
+$RDPintAZ1.IpRange.add('192.168.3.0/24')
+
+$RDPintAZ2 = New-Object Amazon.EC2.Model.IpPermission
+$RDPintAZ2.IpProtocol = 'tcp'
+$RDPintAZ2.FromPort = '3389'
+$RDPintAZ2.ToPort = '3389'
+$RDPintAZ2.IpRange.add('192.168.4.0/24')
+
+#Create Security Group for External Access AZ1
+$RemoteAccessAZ1 = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'External Remote Access PROD AZ1' -GroupDescription 'Allow RDP and SSH from the Internet'
+Grant-EC2SecurityGroupIngress -GroupId $RemoteAccessAZ1 -IpPermissions $RDP, $SSH, $InternalAZ1
+New-EC2Tag -ResourceId $RemoteAccessAZ1  -Tag @{Key='Name';Value=' PROD AZ1 External Access'}
+
+#Create Security Group for External Access AZ2
+$RemoteAccessAZ2 = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'External Remote Access PROD AZ2' -GroupDescription 'Allow RDP and SSH from the Internet'
+Grant-EC2SecurityGroupIngress -GroupId $RemoteAccessAZ2 -IpPermissions $RDP, $SSH, $InternalAZ2
+New-EC2Tag -ResourceId $RemoteAccessAZ2 -Tag @{Key='Name';Value=' PROD AZ2 External Access'}
+
+#Create Security Group for internal servers AZ1
+$InternalAccessAZ1 = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'Internal Access PROD AZ1' -GroupDescription 'Allow RDP from DMZ and unrestricted access inside private subnet'
+Grant-EC2SecurityGroupIngress -GroupId $InternalAccessAZ1 -IpPermissions $RDPintAZ1,$InternalAZ1
+New-EC2Tag -ResourceId $InternalAccessAZ1 -Tag @{Key='Name';Value='PROD AZ1 Internal Access'}
+
+#Create Security Group for internal servers AZ2
+$InternalAccessAZ2 = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'Internal Access PROD AZ2' -GroupDescription 'Allow RDP from DMZ and unrestricted access inside private subnet'
+Grant-EC2SecurityGroupIngress -GroupId $InternalAccessAZ2 -IpPermissions $RDPintAZ2,$InternalAZ2
+New-EC2Tag -ResourceId $InternalAccessAZ2 -Tag @{Key='Name';Value='PROD AZ2 Internal Access'}
+
+#Create a public route AZ1
+$PublicRouteTableAZ1 = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -RouteTableId $PublicRouteTableAZ1.RouteTableId -DestinationCidrBlock '0.0.0.0/0' -GatewayId $InternetGateway.InternetGatewayId
+$null = Register-EC2RouteTable -RouteTableId $PublicRouteTableAZ1.RouteTableId -SubnetId $PublicSubnetAZ1.SubnetId
+New-EC2Tag -ResourceId $PublicRouteTableAZ1.RouteTableId -Tag @{Key='Name';Value='PROD AZ1 Public Route'}
+
+#Create a public route AZ2
+$PublicRouteTableAZ2 = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -RouteTableId $PublicRouteTableAZ2.RouteTableId -DestinationCidrBlock '0.0.0.0/0' -GatewayId $InternetGateway.InternetGatewayId
+$null = Register-EC2RouteTable -RouteTableId $PublicRouteTableAZ2.RouteTableId -SubnetId $PublicSubnetAZ2.SubnetId
+New-EC2Tag -ResourceId $PublicRouteTableAZ2.RouteTableId -Tag @{Key='Name';Value='PROD AZ2 Public Route'}
+
+#Create a private route through the NAT Gateway AZ1
+$PrivateRouteTableAZ1 = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -DestinationCidrBlock 0.0.0.0/0 -NatGatewayId $NatGatewayIDAZ1 -RouteTableId $PrivateRouteTableAZ1.RouteTableId
+$null = Register-EC2RouteTable -RouteTableId $PrivateRouteTableAZ1.RouteTableId -SubnetId $PrivateSubnetAZ1.SubnetId
+New-EC2Tag -ResourceId $PrivateRouteTableAZ1.RouteTableId -Tag @{Key='Name';Value='PROD AZ1 Private Route'}
+
+#Create a private route through the NAT Gateway AZ2
+$PrivateRouteTableAZ2 = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -DestinationCidrBlock 0.0.0.0/0 -NatGatewayId $NatGatewayIDAZ2 -RouteTableId $PrivateRouteTableAZ2.RouteTableId
+$null = Register-EC2RouteTable -RouteTableId $PrivateRouteTableAZ2.RouteTableId -SubnetId $PrivateSubnetAZ2.SubnetId
+New-EC2Tag -ResourceId $PrivateRouteTableAZ2.RouteTableId -Tag @{Key='Name';Value='PROD AZ2 Private Route'}
+
+#Create ELB Security Group
+$http = New-Object Amazon.EC2.Model.IpPermission
+$http.IpProtocol = 'tcp'
+$http.FromPort = '80'
+$http.ToPort = '80'
+$http.IpRange.add('0.0.0.0/0')
+
+$sgELBWeb = New-EC2SecurityGroup -GroupName 'ELB Web Servers' -Description 'ELB Web Servers' -VpcId $VPC.VpcId
+
+Grant-EC2SecurityGroupIngress -GroupId $sgELBWeb -IpPermissions $http
+
+New-EC2Tag -ResourceId $sgELBWeb -Tag @{Key='Name';Value='ELB Web Servers'}
+
+#Create ELB Listener
+$HTTPListener = New-Object 'Amazon.ElasticLoadBalancing.Model.Listener' 
+$HTTPListener.Protocol = 'http'
+$HTTPListener.LoadBalancerPort = 80 
+$HTTPListener.InstancePort = 80
+
+#Create ELB
+New-ELBLoadBalancer -LoadBalancerName WebELB -Subnets $PublicSubnetAZ1.SubnetId,$PublicSubnetAZ2.SubnetId -Listeners $HTTPListener -SecurityGroups $sgELBWeb.GroupId -Tag @{Key='Name';Value='ELB Web'}
+
+Set-ELBHealthCheck -LoadBalancerName WebELB -HealthCheck_Target 'HTTP:80/iisstart.htm' -HealthCheck_Interval 30 -HealthCheck_Timeout 5 -HealthCheck_HealthyThreshold 2 -HealthCheck_UnhealthyThreshold 10
+
+#Create Web Server Security Group
+$http = New-Object Amazon.EC2.Model.IpPermission
+$http.IpProtocol = 'tcp'
+$http.FromPort = '80'
+$http.ToPort = '80'
+$http.IpRange.add('0.0.0.0/0')
+
+$sgWeb = New-EC2SecurityGroup -GroupName 'IIS Web Servers' -Description 'IIS Web Servers' -VpcId $VPC.VpcId
+
+Grant-EC2SecurityGroupIngress -GroupId $sgWeb -IpPermissions $http
+
+New-EC2Tag -ResourceId $sgWeb -Tag @{Key='Name';Value='IIS Web Servers'}
+
+#Web Servers User Data
+$WebUserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+    Install-WindowsFeature Web-Server, Web-Asp-Net45 -IncludeManagementTools
+    </powershell>
+'@
+))
+
+#Create AutoScale Group
+
+$win_ami = Get-EC2ImageByName windows_2012r2_base | select -ExpandProperty ImageId
+
+New-ASLaunchConfiguration -LaunchConfigurationName Web-Servers -ImageId $win_Ami -KeyName $keyname -SecurityGroups $sgweb.GroupId -UserData $WebUserData -InstanceType 't2.micro' -AssociatePublicIpAddress 1
+
+$VPCZoneIdentifier = $PublicSubnetAZ1.SubnetId + "," + $PublicSubnetAZ2.SubnetId 
+
+New-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -LaunchConfigurationName Web-Servers -MinSize 2 -MaxSize 6 -DesiredCapacity 2 -LoadBalancerNames WebELB -VPCZoneIdentifier $VPCZoneIdentifier -HealthCheckType ELB -HealthCheckGracePeriod (15*60) -DefaultCooldown (30*60) -Tag @{Key='Name';Value='AutoScaling Web Server'}
+
+New-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -LaunchConfigurationName Web-Servers -MinSize 2 -MaxSize 6 -VPCZoneIdentifier $VPCZoneIdentifier -Tag @{Key='Name';Value='AutoScaling Web Server'}
+
+#Remove AutoScale Group
+
+Remove-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -ForceDelete $true -Force
+ 
+
