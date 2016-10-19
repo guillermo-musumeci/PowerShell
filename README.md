@@ -1,7 +1,9 @@
 ## Synopsis
 
 PowerShell Conference Asia 2016 sample code
+
 DevOps on AWS with PowerShell section
+
 October 2016, Singapore
 
 ## Authors
