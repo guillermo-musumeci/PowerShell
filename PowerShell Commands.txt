@@ -1,5 +1,6 @@
 <# NOTE: DO NOT RUN THIS SCRIPT #>
 <# PowerShell Conference Asia 2016 #>
+<# October 2016, Singapore #>
 <# Guillermo Musumeci @gmusumeci #>
 
 [ Credentials ]
