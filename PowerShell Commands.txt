@@ -1,0 +1,422 @@
+<# NOTE: DO NOT RUN THIS SCRIPT #>
+<# PowerShell Conference Asia 2016 #>
+<# October 2016, Singapore #>
+<# Guillermo Musumeci @gmusumeci #>
+
+[ Credentials ]
+===============
+
+Set-AWSCredentials -StoreAs PSH -AccessKey $AccessKey -SecretKey $SecretKey
+
+Get-AWSCredentials -ListStoredCredentials
+
+Clear-AWSCredentials -StoredCredentials Default
+
+Get-EC2Instance -AccessKey $AccessKey -SecretKey $SecretKey -Region us-west-1
+
+[ Regions ]
+===========
+
+Get-AWSRegion
+
+Initilize-AWSDefaults -Region ap-southeast-1
+
+Set-DefaultAWSRegion -Region ap-southeast-1
+
+Clear-DefaultAWSRegion
+
+[ Exploring / Discovery ]
+=========================
+
+Get-Command -Module AWSPowerShell | Measure-Object
+
+Get-Command -Module AWSPowerShell | select -First 5
+
+Get-Command -Noun ec2*
+
+Get-Command -Verb new -Noun ec2*
+
+Get-Help
+
+help New-EC2Instance -Examples
+
+[ AWS History ]
+===============
+
+$AWSHistory
+
+$AWSHistory.Commands
+
+Get-History
+
+Get-History | select -ExpandProperty commandline
+
+[ Get AMIs ]
+============
+
+Get-EC2Image | Measure-Object
+
+Get-EC2Image -Filter @{ Name="platform"; Values="windows" } | Measure-Object
+
+Get-EC2Image -Filter @{ Name="platform"; Values="windows" } -Region us-east-1 | Measure-Object
+
+Get-EC2ImageByName
+
+Get-EC2ImageByName windows_2012r2_base
+
+Get-EC2ImageByName windows_2012r2_base | Select ImageId
+
+Get-EC2ImageByName windows_2012r2_base | Select -ExpandProperty ImageId
+
+$win_ami = Get-EC2ImageByName windows_2012r2_base | select -ExpandProperty ImageId
+
+[ Create EC2 Instance ]
+=======================
+
+$EC2instance = New-EC2Instance -ImageId $win_ami -InstanceType t2.medium -KeyName $keyname | select -ExpandProperty Instances
+
+[ Security Groups ]
+===================
+
+Get-EC2SecurityGroup
+
+$sg = Get-EC2SecurityGroup | Where-Object {$_.Description -eq 'demo-iis-sql'}
+
+$sg.IpPermission
+
+$https = New-Object Amazon.EC2.Model.IpPermission
+$https.IpProtocol = 'tcp'
+$https.FromPort = '443'
+$https.ToPort = '443'
+$https.IpRange.add('0.0.0.0/0')
+
+Grant-EC2SecurityGroupIngress -GroupId $sg -IpPermissions $https
+
+$sg.IpPermission
+
+$sgweb = New-EC2SecurityGroup -GroupName WebServers -Description 'IIS Web Servers Group'
+
+Grant-EC2SecurityGroupIngress -GroupId $sgweb -IpPermissions $https
+
+Get-EC2SecurityGroup | Where-Object {$_.GroupName -eq 'WebServers'} | Select -ExpandProperty IpPermission
+
+[ Tags ]
+========
+
+New-EC2Tag -Resource $instance_id.InstanceId -Tags @{key='Name';value='sg-web-01'}
+
+New-EC2Tag -Resource $instance_id.InstanceId -Tags @{key='Name';value='sg-web-01'},@{key='Environment';value='development'}
+
+Get-EC2Tag | Where-Object {$_.ResourceId -eq $instance_id.InstanceId}
+
+Get-EC2Instance -Filter @{name='tag:Name';values='sg-web-01'}
+
+[ EBS Drive ]
+=============
+
+$EBSvol = New-Object Amazon.EC2.Model.EbsBlockDevice
+$EBSvol.VolumeSize = 30
+$EBSvol.VolumeType = 'gp2'
+
+$map = New-Object Amazon.EC2.Model.BlockDeviceMapping
+$map.DeviceName = 'xvdf'
+$map.Ebs = $EBSvol
+
+$EC2instance = New-EC2Instance -ImageId $win_ami -InstanceType t2.medium -KeyName $keyname -BlockDeviceMapping $map | select -ExpandProperty Instances
+
+$ec2vol = New-EC2Volume -VolumeType gp2 -Size 30 -AvailabilityZone $instance_id.Placement.AvailabilityZone
+
+Add-EC2Volume -InstanceId $instance_id.InstanceId -VolumeId $ec2vol.VolumeId -Device xvdb
+
+[ Get Password ]
+================
+
+$keyname = 'C:\AWSKeyFolder\' + $instance_id.keyname + ".pem"
+Get-EC2PasswordData -InstanceId $instance_id.InstanceId -PemFile $keyname
+
+[ User Data ]
+=============
+
+$WinUserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+    Install-WindowsFeature RDS-Gateway -IncludeManagementTools
+    Rename_Computer -NewName SG-WEB-01 -Restart
+    </powershell>
+'@
+))
+
+$SGWebServer = New-EC2Instance -ImageId $win_ami -InstanceType t2.medium -KeyName $keyname -UserData $| select -ExpandProperty Instances
+
+[ EC2 Meta Data ]
+=================
+
+Invoke-RestMethod http://169.254.169.254/latest/meta-data
+
+Invoke-RestMethod http://169.254.169.254/latest/meta-data/ami-id
+
+Invoke-RestMethod http://169.254.169.254/latest/meta-data/instance-id
+
+Invoke-RestMethod http://169.254.169.254/latest/meta-data/public-ipv4
+
+[Create VPC and Subnets]
+========================
+
+#Create the VPC
+$VPCCIDR = '10.0.0.0/16'
+$VPC = New-EC2Vpc -CidrBlock $VPCCIDR
+New-EC2Tag -ResourceId $VPC.VpcId -Tag @{Key='Name';Value='Dev VPC'}
+
+#Get the availability zone
+$AvailabilityZone = Get-EC2AvailabilityZone | Select-Object -First 1 -ExpandProperty ZoneName
+
+#Create the public subnet
+$PublicSubnetCIDR = '10.0.1.0/24'
+$PublicSubnet = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PublicSubnetCIDR -AvailabilityZone $AvailabilityZone
+New-EC2Tag -ResourceId $PublicSubnet.SubnetId  -Tag @{Key='Name';Value='Dev Public Subnet'}
+
+#Create the private subnet
+$PrivateSubnetCIDR = '10.0.2.0/24'
+$PrivateSubnet = New-EC2Subnet -VpcId $VPC.VpcId -CidrBlock $PrivateSubnetCIDR -AvailabilityZone $AvailabilityZone
+New-EC2Tag -ResourceId $PrivateSubnet.SubnetId -Tag @{Key='Name';Value='Dev Private Subnet'}
+
+#Create and Attach Internet Gateway to the VPC
+$InternetGateway = New-EC2InternetGateway
+Add-EC2InternetGateway -InternetGatewayId $InternetGateway.InternetGatewayId -VpcId $VPC.VpcId
+New-EC2Tag -ResourceId $InternetGateway.InternetGatewayId  -Tag @{Key='Name';Value='Dev Internet Gateway'}
+
+#Allocate Elactic IP for NAT Geteway
+$newip = New-EC2Address
+
+#Create a NAT Gateway
+$NatGateway = New-EC2NatGateway -AllocationId $newip.AllocationId -SubnetId $PublicSubnet.SubnetId
+
+#Get NAT Gateway ID
+$NatGatewayID = Get-EC2NatGateway -filter @{name='state';values='available'}  | select -ExpandProperty NatGatewayId
+
+#Create Security Group for External Access
+$RDP = New-Object Amazon.EC2.Model.IpPermission
+$RDP.IpProtocol = 'tcp'
+$RDP.FromPort = '3389'
+$RDP.ToPort = '3389'
+$RDP.IpRange.add('0.0.0.0/0')
+
+$SSH = New-Object Amazon.EC2.Model.IpPermission
+$SSH.IpProtocol = 'tcp'
+$SSH.FromPort = '22'
+$SSH.ToPort = '22'
+$SSH.IpRange.add('0.0.0.0/0')
+
+$Internal = New-Object Amazon.EC2.Model.IpPermission
+$Internal.IpProtocol = 'tcp'
+$Internal.FromPort = '1'
+$Internal.ToPort = '65535'
+$Internal.IpRange.add('10.0.2.0/24')
+
+$RemoteAccess = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'External Remote Access' -GroupDescription 'Allow RDP and SSH from the Internet'
+Grant-EC2SecurityGroupIngress -GroupId $RemoteAccess -IpPermissions $RDP, $SSH, $Internal
+New-EC2Tag -ResourceId $RemoteAccess  -Tag @{Key='Name';Value='Dev External Access'}
+
+#Create Security Group for internal servers
+$RDPint = New-Object Amazon.EC2.Model.IpPermission
+$RDPint.IpProtocol = 'tcp'
+$RDPint.FromPort = '3389'
+$RDPint.ToPort = '3389'
+$RDPint.IpRange.add('10.0.2.0/24')
+
+$Internal = New-Object Amazon.EC2.Model.IpPermission
+$Internal.IpProtocol = 'tcp'
+$Internal.FromPort = '1'
+$Internal.ToPort = '65535'
+$Internal.IpRange.add('10.0.2.0/24')
+
+$InternalAccess = New-EC2SecurityGroup -VpcId $VPC.VpcId -GroupName 'Internal Access' -GroupDescription 'Allow RDP from DMZ and unrestricted access inside private subnet'
+Grant-EC2SecurityGroupIngress -GroupId $InternalAccess -IpPermissions $RDPint,$Internal
+New-EC2Tag -ResourceId $InternalAccess -Tag @{Key='Name';Value='Dev Internal Access'}
+
+#Create a public route
+$PublicRouteTable = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -RouteTableId $PublicRouteTable.RouteTableId -DestinationCidrBlock '0.0.0.0/0' -GatewayId $InternetGateway.InternetGatewayId
+$null = Register-EC2RouteTable -RouteTableId $PublicRouteTable.RouteTableId -SubnetId $PublicSubnet.SubnetId
+New-EC2Tag -ResourceId $PublicRouteTable.RouteTableId -Tag @{Key='Name';Value='Dev Public Route'}
+
+#Create a private route through the NAT gateway
+$PrivateRouteTable = New-EC2RouteTable -VpcId $VPC.VpcId
+New-EC2Route -DestinationCidrBlock 0.0.0.0/0 -NatGatewayId $NatGatewayID -RouteTableId $PrivateRouteTable.RouteTableId
+$null = Register-EC2RouteTable -RouteTableId $PrivateRouteTable.RouteTableId -SubnetId $PrivateSubnet.SubnetId
+New-EC2Tag -ResourceId $PrivateRouteTable.RouteTableId -Tag @{Key='Name';Value='Dev Private Route'}
+
+[Build a RDS Gateway]
+=====================
+
+$RDGWUserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+    Install-WindowsFeature RDS-Gateway -IncludeManagementTools
+    </powershell>
+'@
+))
+
+#Launch the RDGateway
+$RDPInstance = New-EC2Instance -ImageId $WIN_AMI -KeyName $KeyName -InstanceType t2.medium -MinCount 1 -MaxCount 1 -SubnetId $PublicSubnet.SubnetId -SecurityGroupId $RemoteAccess -UserData $RDGWUserData | Select-Object -ExpandProperty Instances
+
+New-EC2Tag -ResourceId $RDPInstance.InstanceID  -Tag @{Key='Name';Value='RDGW'}
+
+$EIP = New-EC2Address -Domain 'vpc'
+
+$null = Register-EC2Address -InstanceId $RDPInstance.InstanceID -AllocationId $EIP.AllocationId
+
+[Build a AD Domain Controller]
+==============================
+
+$DC1UserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    $path= 'HKLM:\Software\UserData'
+
+    if(!(Get-Item $Path -ErrorAction SilentlyContinue)) {
+        New-Item $Path
+        New-ItemProperty -Path $Path -Name RunCount -Value 0 -PropertyType dword
+    }
+
+    $runCount = Get-ItemProperty -Path $path -Name Runcount -ErrorAction SilentlyContinue | 
+        Select-Object -ExpandProperty RunCount
+
+    if($runCount -ge 0) {
+        switch($runCount) {
+            0 {
+                #Change the local admin password
+                ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+
+                #Set a static IP
+                $netip = Get-NetIPConfiguration
+                $ipconfig = Get-NetIPAddress | ?{$_.IpAddress -eq $netip.IPv4Address.IpAddress}
+                Get-NetAdapter | Set-NetIPInterface -DHCP Disabled
+                Get-NetAdapter | New-NetIPAddress -AddressFamily IPv4 -IPAddress $netip.IPv4Address.IpAddress -PrefixLength $ipconfig.PrefixLength -DefaultGateway $netip.IPv4DefaultGateway.NextHop
+                Get-NetAdapter | Set-DnsClientServerAddress -ServerAddresses $netip.DNSServer.ServerAddresses
+
+                #Prep for AD
+                Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+
+                #Increment the RunCount
+                Set-ItemProperty -Path $Path -Name RunCount -Value 1
+
+                #Enable user data
+                $EC2SettingsFile = "$env:ProgramFiles\Amazon\Ec2ConfigService\Settings\Config.xml"
+                $xml = [xml](Get-Content $EC2SettingsFile)
+                $xmlElement = $xml.get_DocumentElement()
+                $xmlElementToModify = $xmlElement.Plugins
+
+                foreach ($element in $xmlElementToModify.Plugin)
+                {
+                    if ($element.name -eq "Ec2HandleUserData")
+                    {
+                        $element.State="Enabled"
+                    }
+                }
+                $xml.Save($EC2SettingsFile)
+
+                #Reboot
+                Rename-Computer -NewName kopidc1 -Restart
+            }
+            1 {
+                #Install AD
+                $pass = ConvertTo-SecureString P0w3rSh3llR0cks -AsPlainText -Force
+                Install-ADDSForest -DomainName kopicloud.com -DomainNetbiosName kopicloud -DomainMode Win2012R2 -ForestMode Win2012R2 -SafeModeAdministratorPassword $pass -Confirm:$false -Force
+            }
+        }
+    }
+    </powershell>
+'@
+))
+
+#Launch the DC
+$DCIP = '10.0.2.10'
+
+$DCInstance = New-EC2Instance -ImageId $WIN_AMI -KeyName $KeyName -InstanceType t2.large -MinCount 1 -MaxCount 1 -SubnetId $PrivateSubnet.SubnetId -PrivateIpAddress $DCIP -UserData $DC1UserData | Select-Object -ExpandProperty Instances
+New-EC2Tag -ResourceId $DCInstance.InstanceID -Tag @{Key='Name';Value='KopiDC1'}
+
+[Build a Web Server]
+====================
+$WebUserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+    Install-WindowsFeature Web-Server, Web-Asp-Net45 -IncludeManagementTools
+    $pass = ConvertTo-SecureString P0w3rSh3llR0cks -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential -ArgumentList 'kopicloud\administrator',$pass
+    Get-NetAdapter | Set-DnsClientServerAddress -ServerAddresses 10.0.2.10
+    Add-Computer -DomainName kopicloud.com -NewName KopiWEB1 -Credential $cred -Force -Restart
+    </powershell>
+'@
+))
+
+#Launch web Server
+$WebInstance = New-EC2Instance -ImageId $WIN_AMI -KeyName $KeyName -InstanceType t2.medium -MinCount 1 -MaxCount 1 -SubnetId $PrivateSubnet.SubnetId -UserData $WebUserData | Select-Object -ExpandProperty Instances
+New-EC2Tag -ResourceId $WebInstance.InstanceID -Tag @{Key='Name';Value='KopiWEB1'}
+
+[ Create Elastic Load Balancer ]
+================================
+#Create ELB Security Group
+$http = New-Object Amazon.EC2.Model.IpPermission
+$http.IpProtocol = 'tcp'
+$http.FromPort = '80'
+$http.ToPort = '80'
+$http.IpRange.add('0.0.0.0/0')
+
+$sgELBWeb = New-EC2SecurityGroup -GroupName 'ELB Web Servers' -Description 'ELB Web Servers' -VpcId $VPC.VpcId
+
+Grant-EC2SecurityGroupIngress -GroupId $sgELBWeb -IpPermissions $http
+
+New-EC2Tag -ResourceId $sgELBWeb -Tag @{Key='Name';Value='ELB Web Servers'}
+
+#Create ELB Listener
+$HTTPListener = New-Object 'Amazon.ElasticLoadBalancing.Model.Listener' 
+$HTTPListener.Protocol = 'http'
+$HTTPListener.LoadBalancerPort = 80 
+$HTTPListener.InstancePort = 80
+
+#Create ELB
+New-ELBLoadBalancer -LoadBalancerName WebELB -Subnets $PublicSubnetAZ1.SubnetId,$PublicSubnetAZ2.SubnetId -Listeners $HTTPListener -SecurityGroups $sgELBWeb.GroupId -Tag @{Key='Name';Value='ELB Web'}
+
+Set-ELBHealthCheck -LoadBalancerName WebELB -HealthCheck_Target 'HTTP:80/iisstart.htm' -HealthCheck_Interval 30 -HealthCheck_Timeout 5 -HealthCheck_HealthyThreshold 2 -HealthCheck_UnhealthyThreshold 10
+
+[ Create the Auto Scale Group ]
+===============================
+
+#Create Web Server Security Group
+$http = New-Object Amazon.EC2.Model.IpPermission
+$http.IpProtocol = 'tcp'
+$http.FromPort = '80'
+$http.ToPort = '80'
+$http.IpRange.add('0.0.0.0/0')
+
+$sgWeb = New-EC2SecurityGroup -GroupName 'IIS Web Servers' -Description 'IIS Web Servers' -VpcId $VPC.VpcId
+
+Grant-EC2SecurityGroupIngress -GroupId $sgWeb -IpPermissions $http
+
+New-EC2Tag -ResourceId $sgWeb -Tag @{Key='Name';Value='IIS Web Servers'}
+
+#Web Servers User Data
+$WebUserData = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(
+@'
+    <powershell>
+    ([adsi]("WinNT://$env:COMPUTERNAME/administrator, user")).psbase.invoke('SetPassword', 'P0w3rSh3llR0cks')
+    Install-WindowsFeature Web-Server, Web-Asp-Net45 -IncludeManagementTools
+    </powershell>
+'@
+))
+
+#Create AutoScale Group
+New-ASLaunchConfiguration -LaunchConfigurationName Web-Servers -ImageId $win_Ami -KeyName $keyname -SecurityGroups $sgweb.GroupId -UserData $WebUserData -InstanceType 't2.micro' -AssociatePublicIpAddress 1
+
+$VPCZoneIdentifier = $PublicSubnetAZ1.SubnetId + "," + $PublicSubnetAZ2.SubnetId 
+
+New-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -LaunchConfigurationName Web-Servers -MinSize 2 -MaxSize 6 -DesiredCapacity 2 -LoadBalancerNames WebELB -VPCZoneIdentifier $VPCZoneIdentifier -HealthCheckType ELB -HealthCheckGracePeriod (15*60) -DefaultCooldown (30*60) -Tag @{Key='Name';Value='AutoScaling Web Server'}
+
+New-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -LaunchConfigurationName Web-Servers -MinSize 2 -MaxSize 6 -VPCZoneIdentifier $VPCZoneIdentifier -Tag @{Key='Name';Value='AutoScaling Web Server'}
+
+Remove-ASAutoScalingGroup -AutoScalingGroupName Web-Servers -ForceDelete $true -Force
+ 
